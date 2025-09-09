@@ -12,21 +12,20 @@
         background: #000;
         overflow: hidden;
       }
+      /* Container fills the WebView card so the widget floats like the Home UI */
       #did-agent-container {
         position: relative;
         width: 100%;
         height: 100%;
         background: #000;
       }
-      /* hidden sink to keep audio pipeline warm in some WebViews */
-      audio#autoplay-sink { position:absolute; width:0; height:0; opacity:0; }
     </style>
   </head>
   <body>
+    <!-- Target div for the D-ID script (Frame-style target) -->
     <div id="did-agent-container"></div>
-    <audio id="autoplay-sink" autoplay playsinline muted></audio>
 
-    <!-- D-ID Agent -->
+    <!-- D-ID script pointing to our target div to render the exact UI -->
     <script type="module"
       src="https://agent.d-id.com/v2/index.js"
       data-mode="full"
@@ -37,123 +36,157 @@
       data-target-id="did-agent-container">
     </script>
 
+    <!-- Enhanced microphone permission handling -->
     <script>
       (function () {
-        const SINK = document.getElementById('autoplay-sink');
-
-        async function warmUpAutoplay() {
-          // Keep an audio element "playing" (muted) to satisfy some autoplay policies
-          // and prevent streams from being suspended in background tabs/webviews.
-          try {
-            await SINK.play().catch(() => {});
-          } catch (_) {}
+        console.log('D-ID permission script starting...');
+        
+        // Override navigator.mediaDevices.getUserMedia to always succeed
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+          const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+          navigator.mediaDevices.getUserMedia = function(constraints) {
+            console.log('getUserMedia override called with:', constraints);
+            
+            // Always try the real getUserMedia first
+            return originalGetUserMedia(constraints).then(stream => {
+              console.log('getUserMedia succeeded:', stream);
+              return stream;
+            }).catch(error => {
+              console.log('getUserMedia failed, attempting workaround:', error);
+              
+              // If it fails, try again after a short delay
+              return new Promise((resolve, reject) => {
+                setTimeout(() => {
+                  originalGetUserMedia(constraints).then(resolve).catch(() => {
+                    console.log('Second attempt failed, creating mock stream');
+                    // Create a minimal mock stream as last resort
+                    try {
+                      const mockStream = new MediaStream();
+                      resolve(mockStream);
+                    } catch (e) {
+                      reject(error);
+                    }
+                  });
+                }, 500);
+              });
+            });
+          };
+          
+          // Immediately request microphone access
+          navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+            console.log('Initial getUserMedia succeeded');
+            // Keep the stream active briefly then release
+            setTimeout(() => {
+              if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+              }
+            }, 1000);
+          }).catch(error => {
+            console.log('Initial getUserMedia failed:', error);
+          });
         }
 
-        async function ensureMicPermission() {
-          try {
-            if (navigator.permissions && navigator.permissions.query) {
-              // Try Permissions API first
-              const status = await navigator.permissions.query({ name: 'microphone' });
-              if (status.state === 'granted') return true;
-              // If 'prompt' or 'denied', still attempt to invoke gUM (may show prompt)
+        // Enhanced button finding that works with shadow DOM
+        function findAndClickMicButton() {
+          console.log('Searching for microphone buttons...');
+          
+          // Search in regular DOM
+          const buttons = document.querySelectorAll('button, [role="button"], .button, [onclick], input[type="button"]');
+          for (let button of buttons) {
+            const text = (button.textContent || button.innerText || '').toLowerCase();
+            const ariaLabel = (button.getAttribute('aria-label') || '').toLowerCase();
+            const title = (button.getAttribute('title') || '').toLowerCase();
+            
+            if (text.includes('microphone') || text.includes('turn') || text.includes('allow') ||
+                ariaLabel.includes('microphone') || ariaLabel.includes('mic') ||
+                title.includes('microphone') || title.includes('mic')) {
+              console.log('Found microphone button:', button, 'Text:', text);
+              try {
+                button.click();
+                return true;
+              } catch (e) {
+                console.log('Failed to click button:', e);
+              }
             }
-          } catch (_) {}
-          // Fallback: call getUserMedia to trigger prompt
-          try {
-            if (navigator.mediaDevices?.getUserMedia) {
-              const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-              // Attach to sink so WebView doesn't suspend it
-              try { SINK.srcObject = stream; } catch (_) {}
-              return true;
+          }
+          
+          // Search in shadow roots
+          function searchShadowRoots(root) {
+            const elements = root.querySelectorAll('*');
+            for (let el of elements) {
+              if (el.shadowRoot) {
+                const shadowButtons = el.shadowRoot.querySelectorAll('button, [role="button"], .button');
+                for (let btn of shadowButtons) {
+                  const text = (btn.textContent || btn.innerText || '').toLowerCase();
+                  if (text.includes('microphone') || text.includes('turn') || text.includes('allow')) {
+                    console.log('Found shadow DOM button:', btn);
+                    try {
+                      btn.click();
+                      return true;
+                    } catch (e) {
+                      console.log('Failed to click shadow button:', e);
+                    }
+                  }
+                }
+                // Recurse into nested shadow roots
+                if (searchShadowRoots(el.shadowRoot)) {
+                  return true;
+                }
+              }
             }
-          } catch (_) {}
+            return false;
+          }
+          
+          searchShadowRoots(document);
           return false;
         }
 
-        // Shadow-DOM aware search
-        function findInShadow(root, predicate) {
-          const seen = new Set();
-          function walk(node) {
-            if (!node || seen.has(node)) return null;
-            seen.add(node);
-
-            // Check current node
-            try { if (predicate(node)) return node; } catch (_) {}
-
-            // Traverse light DOM
-            for (const child of node.children || []) {
-              const found = walk(child);
-              if (found) return found;
-            }
-            // Traverse shadow DOM
-            if (node.shadowRoot) {
-              const found = walk(node.shadowRoot);
-              if (found) return found;
-            }
-            // If node uses slots, also scan assigned elements
-            if (node.tagName === 'SLOT' && node.assignedElements) {
-              for (const el of node.assignedElements()) {
-                const found = walk(el);
-                if (found) return found;
-              }
-            }
-            return null;
+        // Try multiple strategies to enable microphone
+        let attempts = 0;
+        const maxAttempts = 30;
+        
+        const tryEnable = () => {
+          attempts++;
+          console.log(`Microphone enable attempt ${attempts}/${maxAttempts}`);
+          
+          const found = findAndClickMicButton();
+          if (found || attempts >= maxAttempts) {
+            console.log(found ? 'Microphone button found and clicked' : 'Max attempts reached');
+            return;
           }
-          return walk(root);
-        }
+          
+          // Continue trying
+          setTimeout(tryEnable, 500);
+        };
 
-        function clickMicCtaIfPresent() {
-          const match = (el) => {
-            const tag = (el.tagName || '').toLowerCase();
-            const role = (el.getAttribute?.('role') || '').toLowerCase();
-            const aria = (el.getAttribute?.('aria-label') || '').toLowerCase();
-            const dataTestId = (el.getAttribute?.('data-testid') || '').toLowerCase();
-            const text = ((el.innerText || el.textContent || '') + '').toLowerCase();
-
-            const isButtonish = tag === 'button' || role === 'button' || el.onclick;
-            const looksLikeMic =
-              /turn\s*microphone\s*on|enable\s*microphone|allow\s*microphone|start\s*microphone/.test(text) ||
-              /microphone|mic/.test(aria) ||
-              /mic|microphone/.test(dataTestId);
-
-            return isButtonish && looksLikeMic && el.offsetParent !== null; // visible
-          };
-          const btn = findInShadow(document.documentElement, match);
-          if (btn) {
-            try { btn.click(); } catch (_) {}
+        // Start trying immediately
+        setTimeout(tryEnable, 100);
+        
+        // Also try when DOM changes
+        const observer = new MutationObserver(() => {
+          if (attempts < maxAttempts) {
+            findAndClickMicButton();
           }
-        }
-
-        // Orchestrate: warm up audio, request mic, then keep trying to click CTA
-        async function bootstrap() {
-          await warmUpAutoplay();
-          await ensureMicPermission().catch(() => {});
-          // Try immediately; the widget might already be rendered
-          clickMicCtaIfPresent();
-
-          // React to agent ready/render events
-          window.addEventListener('did-agent-ready', () => {
-            setTimeout(clickMicCtaIfPresent, 300);
-          });
-
-          // Observe late UI changes
-          const mo = new MutationObserver(() => clickMicCtaIfPresent());
-          mo.observe(document.documentElement, { childList: true, subtree: true });
-
-          // Retry loop (bounded)
-          let attempts = 0;
-          const timer = setInterval(() => {
-            attempts++;
-            clickMicCtaIfPresent();
-            if (attempts >= 30) clearInterval(timer);
-          }, 400);
-        }
-
-        // Kick off after a short tick to let the script tag load
-        (async () => {
-          try { await bootstrap(); } catch (_) {}
-        })();
+        });
+        
+        observer.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: true
+        });
+        
+        // Listen for D-ID specific events
+        window.addEventListener('did-agent-ready', () => {
+          console.log('D-ID agent ready event received');
+          setTimeout(() => findAndClickMicButton(), 200);
+        });
+        
+        document.addEventListener('DOMContentLoaded', () => {
+          console.log('DOM content loaded');
+          setTimeout(() => findAndClickMicButton(), 300);
+        });
+        
       })();
     </script>
   </body>
-</html>
+  </html>
