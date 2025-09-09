@@ -35,6 +35,66 @@
       data-monitor="true"
       data-target-id="did-agent-container">
     </script>
+
+    <!-- Auto-enable microphone: request getUserMedia and try to click the mic CTA when present -->
+    <script>
+      (function () {
+        try {
+          if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            navigator.mediaDevices.getUserMedia({ audio: true }).catch(function(){});
+          }
+
+          function findInShadow(root, predicate) {
+            try {
+              const treeWalker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null);
+              while (treeWalker.nextNode()) {
+                const el = treeWalker.currentNode;
+                if (predicate(el)) return el;
+                if (el.shadowRoot) {
+                  const found = findInShadow(el.shadowRoot, predicate);
+                  if (found) return found;
+                }
+              }
+            } catch (_) {}
+            return null;
+          }
+
+          function tryEnableMic() {
+            // Try common button texts/labels used by the widget
+            const match = function (el) {
+              const text = (el.innerText || el.textContent || '').toLowerCase();
+              const aria = (el.getAttribute && (el.getAttribute('aria-label') || '')).toLowerCase();
+              const role = (el.getAttribute && (el.getAttribute('role') || '')).toLowerCase();
+              return (
+                (role === 'button' || el.tagName === 'BUTTON') &&
+                (/turn\s*microphone\s*on|enable\s*microphone|allow\s*microphone/.test(text) ||
+                 /microphone|mic/.test(aria))
+              );
+            };
+            var button = findInShadow(document.documentElement, match);
+            if (button) {
+              try { button.click(); } catch (_) {}
+            }
+          }
+
+          window.addEventListener('did-agent-ready', function () {
+            // Give the widget a moment to render its UI
+            setTimeout(tryEnableMic, 300);
+          });
+
+          // Also observe DOM changes to catch late renders
+          var mo = new MutationObserver(function(){ tryEnableMic(); });
+          mo.observe(document.documentElement, { childList: true, subtree: true });
+          // Last resort: periodic attempts for a short time
+          var attempts = 0;
+          var it = setInterval(function(){
+            attempts++;
+            tryEnableMic();
+            if (attempts > 20) clearInterval(it);
+          }, 500);
+        } catch (_) {}
+      })();
+    </script>
   </body>
   </html>
 
