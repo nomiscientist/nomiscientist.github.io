@@ -12,20 +12,21 @@
         background: #000;
         overflow: hidden;
       }
-      /* Container fills the WebView card so the widget floats like the Home UI */
       #did-agent-container {
         position: relative;
         width: 100%;
         height: 100%;
         background: #000;
       }
+      /* hidden sink to keep audio pipeline warm in some WebViews */
+      audio#autoplay-sink { position:absolute; width:0; height:0; opacity:0; }
     </style>
   </head>
   <body>
-    <!-- Target div for the D-ID script (Frame-style target) -->
     <div id="did-agent-container"></div>
+    <audio id="autoplay-sink" autoplay playsinline muted></audio>
 
-    <!-- D-ID script pointing to our target div to render the exact UI -->
+    <!-- D-ID Agent -->
     <script type="module"
       src="https://agent.d-id.com/v2/index.js"
       data-mode="full"
@@ -36,66 +37,123 @@
       data-target-id="did-agent-container">
     </script>
 
-    <!-- Auto-enable microphone: request getUserMedia and try to click the mic CTA when present -->
     <script>
       (function () {
-        try {
-          if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-            navigator.mediaDevices.getUserMedia({ audio: true }).catch(function(){});
-          }
+        const SINK = document.getElementById('autoplay-sink');
 
-          function findInShadow(root, predicate) {
-            try {
-              const treeWalker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null);
-              while (treeWalker.nextNode()) {
-                const el = treeWalker.currentNode;
-                if (predicate(el)) return el;
-                if (el.shadowRoot) {
-                  const found = findInShadow(el.shadowRoot, predicate);
-                  if (found) return found;
-                }
+        async function warmUpAutoplay() {
+          // Keep an audio element "playing" (muted) to satisfy some autoplay policies
+          // and prevent streams from being suspended in background tabs/webviews.
+          try {
+            await SINK.play().catch(() => {});
+          } catch (_) {}
+        }
+
+        async function ensureMicPermission() {
+          try {
+            if (navigator.permissions && navigator.permissions.query) {
+              // Try Permissions API first
+              const status = await navigator.permissions.query({ name: 'microphone' });
+              if (status.state === 'granted') return true;
+              // If 'prompt' or 'denied', still attempt to invoke gUM (may show prompt)
+            }
+          } catch (_) {}
+          // Fallback: call getUserMedia to trigger prompt
+          try {
+            if (navigator.mediaDevices?.getUserMedia) {
+              const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+              // Attach to sink so WebView doesn't suspend it
+              try { SINK.srcObject = stream; } catch (_) {}
+              return true;
+            }
+          } catch (_) {}
+          return false;
+        }
+
+        // Shadow-DOM aware search
+        function findInShadow(root, predicate) {
+          const seen = new Set();
+          function walk(node) {
+            if (!node || seen.has(node)) return null;
+            seen.add(node);
+
+            // Check current node
+            try { if (predicate(node)) return node; } catch (_) {}
+
+            // Traverse light DOM
+            for (const child of node.children || []) {
+              const found = walk(child);
+              if (found) return found;
+            }
+            // Traverse shadow DOM
+            if (node.shadowRoot) {
+              const found = walk(node.shadowRoot);
+              if (found) return found;
+            }
+            // If node uses slots, also scan assigned elements
+            if (node.tagName === 'SLOT' && node.assignedElements) {
+              for (const el of node.assignedElements()) {
+                const found = walk(el);
+                if (found) return found;
               }
-            } catch (_) {}
+            }
             return null;
           }
+          return walk(root);
+        }
 
-          function tryEnableMic() {
-            // Try common button texts/labels used by the widget
-            const match = function (el) {
-              const text = (el.innerText || el.textContent || '').toLowerCase();
-              const aria = (el.getAttribute && (el.getAttribute('aria-label') || '')).toLowerCase();
-              const role = (el.getAttribute && (el.getAttribute('role') || '')).toLowerCase();
-              return (
-                (role === 'button' || el.tagName === 'BUTTON') &&
-                (/turn\s*microphone\s*on|enable\s*microphone|allow\s*microphone/.test(text) ||
-                 /microphone|mic/.test(aria))
-              );
-            };
-            var button = findInShadow(document.documentElement, match);
-            if (button) {
-              try { button.click(); } catch (_) {}
-            }
+        function clickMicCtaIfPresent() {
+          const match = (el) => {
+            const tag = (el.tagName || '').toLowerCase();
+            const role = (el.getAttribute?.('role') || '').toLowerCase();
+            const aria = (el.getAttribute?.('aria-label') || '').toLowerCase();
+            const dataTestId = (el.getAttribute?.('data-testid') || '').toLowerCase();
+            const text = ((el.innerText || el.textContent || '') + '').toLowerCase();
+
+            const isButtonish = tag === 'button' || role === 'button' || el.onclick;
+            const looksLikeMic =
+              /turn\s*microphone\s*on|enable\s*microphone|allow\s*microphone|start\s*microphone/.test(text) ||
+              /microphone|mic/.test(aria) ||
+              /mic|microphone/.test(dataTestId);
+
+            return isButtonish && looksLikeMic && el.offsetParent !== null; // visible
+          };
+          const btn = findInShadow(document.documentElement, match);
+          if (btn) {
+            try { btn.click(); } catch (_) {}
           }
+        }
 
-          window.addEventListener('did-agent-ready', function () {
-            // Give the widget a moment to render its UI
-            setTimeout(tryEnableMic, 300);
+        // Orchestrate: warm up audio, request mic, then keep trying to click CTA
+        async function bootstrap() {
+          await warmUpAutoplay();
+          await ensureMicPermission().catch(() => {});
+          // Try immediately; the widget might already be rendered
+          clickMicCtaIfPresent();
+
+          // React to agent ready/render events
+          window.addEventListener('did-agent-ready', () => {
+            setTimeout(clickMicCtaIfPresent, 300);
           });
 
-          // Also observe DOM changes to catch late renders
-          var mo = new MutationObserver(function(){ tryEnableMic(); });
+          // Observe late UI changes
+          const mo = new MutationObserver(() => clickMicCtaIfPresent());
           mo.observe(document.documentElement, { childList: true, subtree: true });
-          // Last resort: periodic attempts for a short time
-          var attempts = 0;
-          var it = setInterval(function(){
+
+          // Retry loop (bounded)
+          let attempts = 0;
+          const timer = setInterval(() => {
             attempts++;
-            tryEnableMic();
-            if (attempts > 20) clearInterval(it);
-          }, 500);
-        } catch (_) {}
+            clickMicCtaIfPresent();
+            if (attempts >= 30) clearInterval(timer);
+          }, 400);
+        }
+
+        // Kick off after a short tick to let the script tag load
+        (async () => {
+          try { await bootstrap(); } catch (_) {}
+        })();
       })();
     </script>
   </body>
-  </html>
-
-
+</html>
