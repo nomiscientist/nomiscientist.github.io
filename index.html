@@ -1,16 +1,41 @@
 <!doctype html>
 <html>
-<head><meta charset="utf-8" /></head>
-<body>
-  <script type="module"
+  <head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>D-ID Agent</title>
+    <style>
+      html, body {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        background: #000;
+        overflow: hidden;
+      }
+      /* Container fills the WebView card so the widget floats like the Home UI */
+      #did-agent-container {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        background: #000;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Target div for the D-ID script (Frame-style target) -->
+    <div id="did-agent-container"></div>
+
+    <!-- D-ID script pointing to our target div to render the exact UI -->
+    <script type="module"
       src="https://agent.d-id.com/v2/index.js"
-      data-mode="fabio"
+      data-mode="full"
       data-client-key="YXV0aDB8Njg1NWEzZmU2MDNkMjcxMzBiMjViOGUwOkpUMU5fSXdTSlNXbWV5S0NZOWQzcg=="
       data-agent-id="v2_agt_nzoiZmK1"
       data-name="did-agent"
       data-monitor="true"
-      data-orientation="horizontal"
-      data-position="right">
-</script>
-</body>
-</html>
+      data-target-id="did-agent-container">
+    </script>
+  </body>
+  </html>
+
+
